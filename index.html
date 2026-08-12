@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#123b66">
+<title>TD6 Tracking Field Test v0.11</title>
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+:root{font-family:Arial,Helvetica,sans-serif;color:#17212b;background:#f3f6fa}*{box-sizing:border-box}body{margin:0;background:#f3f6fa}header{position:sticky;top:0;z-index:5;background:#123b66;color:#fff;padding:14px 16px}.row{display:flex;justify-content:space-between;align-items:center;gap:10px}h1{font-size:18px;margin:0}.badge{font-size:12px;font-weight:800;background:#dbeafe;color:#123b66;border-radius:999px;padding:5px 9px}main{max-width:900px;margin:auto;padding:14px}.card{background:#fff;border:1px solid #ccd6df;border-radius:13px;margin-bottom:13px;overflow:hidden}.card h2{font-size:15px;margin:0;padding:11px 14px;background:#f8fafc;border-bottom:1px solid #d9e1e7}.content{padding:14px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.stat{border:1px solid #d3dde5;border-radius:10px;padding:10px}.stat small{display:block;color:#60707d;font-size:11px;font-weight:700;text-transform:uppercase}.stat strong{display:block;font-size:20px;margin-top:5px;overflow-wrap:anywhere}.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.actions button{min-height:52px;border:0;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer}.start{background:#177b43;color:#fff}.stop{background:#a11b1b;color:#fff}.offline{background:#b36b00;color:#fff}.secondary{background:#e6edf4;color:#183247}.actions button:disabled{opacity:.45}.field{margin-bottom:12px}.field label{display:block;font-size:12px;font-weight:800;margin-bottom:5px}.field input{width:100%;padding:10px;border:1px solid #b8c5cf;border-radius:9px;font-size:14px}.note{font-size:13px;color:#52616d;line-height:1.45}.status{font-weight:800;margin-bottom:10px}.good{color:#18703d}.warn{color:#a35b00}.bad{color:#a11b1b}.log{border:1px solid #d3dde5;border-radius:10px;max-height:330px;overflow:auto;background:#fbfcfd}.log div{padding:8px 10px;border-bottom:1px solid #e2e8ee;font-size:12px;white-space:pre-wrap}.footer{text-align:center;color:#60707d;font-size:12px;padding-bottom:18px}.pill{display:inline-block;border-radius:999px;padding:4px 8px;font-size:12px;font-weight:800;background:#e6edf4;color:#183247}.pill.off{background:#fde7c7;color:#8a4b00}@media(max-width:700px){.grid,.actions{grid-template-columns:1fr}.row{align-items:flex-start}}
+</style>
+</head>
+<body>
+<header><div class="row"><h1>Tracking Field Test</h1><span class="badge">TD6 TEST v0.11</span></div></header>
+<main>
+<section class="card"><h2>Google test endpoint</h2><div class="content"><div class="field"><label for="endpoint">Apps Script web app URL</label><input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/.../exec"></div><div class="field"><label for="senderId">Sender ID</label><input id="senderId" type="text" maxlength="30" placeholder="e.g. PHONE-A" autocomplete="off"></div><p class="note">Both values are remembered on this device. This test uses the Tracking Code.gs v0.20 front end and does not touch the STC Recorder.</p></div></section>
+<section class="card"><h2>Field tracking</h2><div class="content">
+<div id="stcTrackDisplay" style="font-size:22px;font-weight:900;margin-bottom:12px">Tracks 0</div>
+<div id="status" class="status">Ready.</div>
+<div class="actions"><button id="trackBtn" class="start">Start Tracking</button><button id="offlineBtn" class="offline">Simulate Offline</button><button id="endBtn" class="secondary">End Event</button></div>
+<p class="note">During the event, retained tracks recover one-by-one when Google is available. Bulk transfer is used only at End Event for whatever remains retained.</p>
+</div></section>
+<section class="card"><h2>Test details</h2><div class="content"><div class="grid"><div class="stat"><small>GPS</small><strong id="gps">Waiting</strong></div><div class="stat"><small>Recorded</small><strong id="recorded">0</strong></div><div class="stat"><small>Retained</small><strong id="queued">0</strong></div><div class="stat"><small>Live confirmed</small><strong id="liveConfirmed">0</strong></div><div class="stat"><small>Bulk confirmed</small><strong id="pkgConfirmed">0</strong></div><div class="stat"><small>Failures</small><strong id="failures">0</strong></div></div><p style="margin-bottom:0"><span id="commPill" class="pill">Google enabled</span></p></div></section>
+<section class="card"><h2>Activity</h2><div class="content"><div id="log" class="log"></div></div></section>
+</main><div class="footer">Field proof: GPS → local queue → live confirm / bulk recovery → Google</div>
+<script>
+(()=>{'use strict';
+const VERSION='0.11',KEY='RALLY-TRACKING',INTERVAL_MS=30000,MAX_PACKAGE=1000;
+const STORE_ENDPOINT='td6-field-endpoint-v011',STORE_SENDER='td6-field-sender-v011',STORE_QUEUE='td6-field-queue-v011',STORE_SEQ='td6-field-seq-v011',STORE_ACTIVE_PACKAGE='td6-field-active-package-v011',STORE_TOTAL='td6-field-total-v011';
+const $=id=>document.getElementById(id);
+let watchId=null,recordTimer=null,retryTimer=null,latestFix=null,running=false,eventEnded=false,simulateOffline=false,deliveryBusy=false;
+let liveConfirmed=0,pkgConfirmed=0,failures=0;
+$('endpoint').value=localStorage.getItem(STORE_ENDPOINT)||'';$('senderId').value=localStorage.getItem(STORE_SENDER)||'';
+$('endpoint').addEventListener('change',()=>localStorage.setItem(STORE_ENDPOINT,$('endpoint').value.trim()));$('senderId').addEventListener('change',()=>localStorage.setItem(STORE_SENDER,$('senderId').value.trim()));
+function log(msg){const d=document.createElement('div');d.textContent=`${new Date().toLocaleTimeString([], {hour12:false})}  ${msg}`;$('log').prepend(d)}
+function status(msg,cls=''){const e=$('status');e.textContent=msg;e.className='status '+cls}
+function endpoint(){const v=$('endpoint').value.trim();if(!v)throw new Error('Enter the Apps Script web app URL');localStorage.setItem(STORE_ENDPOINT,v);return v}
+function senderId(){const v=$('senderId').value.trim();if(!v)throw new Error('Enter a Sender ID');const clean=v.replace(/[^A-Za-z0-9_-]/g,'-').slice(0,30);localStorage.setItem(STORE_SENDER,clean);return clean}
+function loadQueue(){try{const q=JSON.parse(localStorage.getItem(STORE_QUEUE)||'[]');return Array.isArray(q)?q:[]}catch(_){return []}}
+function saveQueue(q){localStorage.setItem(STORE_QUEUE,JSON.stringify(q));updateStats()}
+function loadActivePackage(){try{return JSON.parse(localStorage.getItem(STORE_ACTIVE_PACKAGE)||'null')}catch(_){return null}}
+function saveActivePackage(p){if(p)localStorage.setItem(STORE_ACTIVE_PACKAGE,JSON.stringify(p));else localStorage.removeItem(STORE_ACTIVE_PACKAGE)}
+function nextSeq(){const n=Number(localStorage.getItem(STORE_SEQ)||0)+1;localStorage.setItem(STORE_SEQ,String(n));return n}
+function reportKey(r){return [r.eventId,r.senderId,String(r.sequence),new Date(r.gpsTime).toISOString()].join('|')}
+function updateStats(){const q=loadQueue();$('queued').textContent=q.length;$('recorded').textContent=localStorage.getItem(STORE_TOTAL)||'0';$('liveConfirmed').textContent=liveConfirmed;$('pkgConfirmed').textContent=pkgConfirmed;$('failures').textContent=failures;const simple=$('stcTrackDisplay');if(simple){simple.textContent=eventEnded?(q.length?'Transferring…':'Transfer complete'):`Tracks ${q.length}`;}const p=$('commPill');p.textContent=simulateOffline?'Simulated offline':(navigator.onLine?'Google enabled':'Device offline');p.className='pill'+(simulateOffline||!navigator.onLine?' off':'')}
+function canSend(){return !simulateOffline && navigator.onLine}
+function makeReport(){if(!latestFix)throw new Error('No GPS fix yet');const seq=nextSeq(),sender=senderId(),now=new Date(),eventDate=now.toISOString().slice(0,10);const r={eventId:`FIELD-TEST-${sender}-${eventDate}`,rallyTitle:'TD6 Tracking Field Test',day:'Day 1',route:'FIELD TEST',rallyNo:'TEST',driverName:sender,latitude:latestFix.latitude,longitude:latestFix.longitude,accuracy:latestFix.accuracy,speedKph:latestFix.speed==null?'':Math.max(0,latestFix.speed*3.6),senderId:sender,sequence:seq,gpsTime:new Date(latestFix.time).toISOString(),eventType:'POSITION'};r._reportKey=reportKey(r);return r}
+function queueLatestFix(){if(!running||!latestFix)return;try{const r=makeReport(),q=loadQueue();q.push(r);saveQueue(q);const total=Number(localStorage.getItem(STORE_TOTAL)||0)+1;localStorage.setItem(STORE_TOTAL,String(total));updateStats();log(`TRACK ${r.sequence} QUEUED · acc ${Math.round(Number(r.accuracy)||0)} m · queue ${q.length}`);wakeDelivery()}catch(e){status(e.message,'bad')}}
+function cleanTrack(r){const c={...r};delete c._reportKey;return c}
+function postHidden(url,fields,lifeMs=30000){return new Promise((resolve,reject)=>{let form=null,frame=null;try{const token=`td6_${Date.now()}_${Math.random().toString(36).slice(2)}`;frame=document.createElement('iframe');frame.name=token;frame.style.display='none';frame.setAttribute('aria-hidden','true');document.body.appendChild(frame);form=document.createElement('form');form.method='POST';form.action=url;form.target=token;form.style.display='none';Object.entries(fields).forEach(([name,value])=>{const input=document.createElement('textarea');input.name=name;input.value=value;form.appendChild(input)});document.body.appendChild(form);form.submit();setTimeout(()=>{if(form&&form.parentNode)form.remove();resolve()},500);setTimeout(()=>{if(frame&&frame.parentNode)frame.remove()},lifeMs)}catch(err){if(form&&form.parentNode)form.remove();if(frame&&frame.parentNode)frame.remove();reject(err)}})}
+function jsonp(params,timeout=12000){return new Promise((resolve,reject)=>{let script=null,timer=null,done=false;const callback=`td6cb_${Date.now()}_${Math.random().toString(36).slice(2).replace(/[^A-Za-z0-9_$]/g,'')}`;const cleanup=()=>{if(timer)clearTimeout(timer);if(script&&script.parentNode)script.remove();try{delete window[callback]}catch(_){window[callback]=undefined}};window[callback]=data=>{done=true;cleanup();if(!data||!data.ok)return reject(new Error(data&&data.error?data.error:'Google lookup failed'));resolve(data)};const q=new URLSearchParams({...params,callback,_:String(Date.now())});script=document.createElement('script');script.async=true;script.src=`${endpoint()}?${q.toString()}`;script.onerror=()=>{cleanup();reject(new Error('Google lookup unavailable'))};script.onload=()=>{if(!done){cleanup();reject(new Error('Google callback not returned'))}};timer=setTimeout(()=>{cleanup();reject(new Error('Google lookup timed out'))},timeout);document.head.appendChild(script)})}
+async function confirmLive(r){for(let i=1;i<=5;i++){try{const x=await jsonp({mode:'trackingConfirm',key:KEY,reportKey:r._reportKey});if(x.confirmed)return true}catch(e){if(i===5)throw e}if(i<5)await sleep(1800)}return false}
+async function sendLive(r){await postHidden(endpoint(),{mode:'liveSubmit',key:KEY,data:JSON.stringify(cleanTrack(r))});await sleep(900);return await confirmLive(r)}
+function makePackage(tracks){const sender=senderId(),id=`FIELD-PKG-${sender}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;return {schemaVersion:1,packageId:id,createdAt:new Date().toISOString(),senderId:sender,recordCount:tracks.length,tracks:tracks.map(cleanTrack),reportKeys:tracks.map(r=>r._reportKey)}}
+async function confirmPackage(pkg){for(let i=1;i<=10;i++){try{const x=await jsonp({mode:'packageConfirm',key:KEY,packageId:pkg.packageId});if(x.confirmed)return true}catch(e){if(i===10)throw e}if(i<10)await sleep(1800)}return false}
+async function deliverPackage(pkg){try{if(await confirmPackageOnce(pkg))return true}catch(_){}await postHidden(endpoint(),{mode:'packageSubmit',key:KEY,data:JSON.stringify(pkg)});await sleep(1000);return await confirmPackage(pkg)}
+async function confirmPackageOnce(pkg){const x=await jsonp({mode:'packageConfirm',key:KEY,packageId:pkg.packageId},8000);return !!x.confirmed}
+function removeKeys(keys){const wanted=new Set(keys),q=loadQueue().filter(r=>!wanted.has(r._reportKey));saveQueue(q)}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+async function deliveryCycle(forcePackage=false){
+  if(deliveryBusy||!canSend())return;
+  const q0=loadQueue();
+  if(!q0.length){
+    status(eventEnded?'Transfer complete':(running?'Tracking · queue clear':'Stopped · queue clear'),'good');
+    updateStats();
+    return;
+  }
+  deliveryBusy=true;
+  try{
+    let active=loadActivePackage();
+
+    // Bulk is reserved for End Event only.
+    if(eventEnded || forcePackage || active){
+      if(!active){
+        const q=loadQueue();
+        active=makePackage(q.slice(0,Math.min(MAX_PACKAGE,q.length)));
+        saveActivePackage(active);
+      }
+      status(`Transferring ${active.tracks.length} retained track${active.tracks.length===1?'':'s'}…`,'warn');
+      updateStats();
+      if(await deliverPackage(active)){
+        removeKeys(active.reportKeys);
+        saveActivePackage(null);
+        pkgConfirmed++;
+        updateStats();
+        log(`BULK CONFIRMED · ${active.tracks.length} tracks · retained ${loadQueue().length}`);
+      }else{
+        throw new Error('Bulk package not confirmed');
+      }
+    }else{
+      // During the event use the normal one-by-one recovery path only.
+      const q=loadQueue();
+      const r=q[0];
+      status(q.length>1?`Recovering retained track ${r.sequence} · ${q.length} retained…`:`Sending live track ${r.sequence}…`,'warn');
+      if(await sendLive(r)){
+        removeKeys([r._reportKey]);
+        liveConfirmed++;
+        updateStats();
+        log(`LIVE ${r.sequence} CONFIRMED · retained ${loadQueue().length}`);
+      }else{
+        throw new Error(`Live ${r.sequence} not confirmed`);
+      }
+    }
+  }catch(e){
+    failures++;
+    updateStats();
+    status(`Data retained — retrying · ${e.message}`,'bad');
+    log(`RETAINED · ${e.message}`);
+  }finally{
+    deliveryBusy=false;
+    if(loadQueue().length&&canSend())scheduleRetry();
+  }
+}
+function wakeDelivery(force=false){clearTimeout(retryTimer);retryTimer=setTimeout(()=>deliveryCycle(force),250)}
+function scheduleRetry(){clearTimeout(retryTimer);retryTimer=setTimeout(()=>deliveryCycle(false),10000)}
+function startGps(){if(!navigator.geolocation)throw new Error('GPS is not available in this browser');watchId=navigator.geolocation.watchPosition(pos=>{latestFix={latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:pos.coords.accuracy,speed:pos.coords.speed,time:pos.timestamp||Date.now()};$('gps').textContent=`${Math.round(pos.coords.accuracy||0)} m`;if(running&&recordTimer&&Number(localStorage.getItem(STORE_TOTAL)||0)===0){}},err=>{ $('gps').textContent='GPS error';log(`GPS ERROR · ${err.message}`)},{enableHighAccuracy:true,maximumAge:2000,timeout:15000})}
+function startTracking(){try{endpoint();senderId();if(!watchId)startGps();eventEnded=false;running=true;$('trackBtn').textContent='Stop Tracking';$('trackBtn').className='stop';status('Tracking started · waiting for GPS fix…','warn');const startWhenReady=()=>{if(!running)return;if(latestFix){queueLatestFix();recordTimer=setInterval(queueLatestFix,INTERVAL_MS);return}setTimeout(startWhenReady,500)};startWhenReady();log('TRACKING STARTED')}catch(e){status(e.message,'bad')}}
+function stopTracking(){running=false;if(recordTimer){clearInterval(recordTimer);recordTimer=null}$('trackBtn').textContent='Start Tracking';$('trackBtn').className='start';log('TRACKING STOPPED')}
+function endEvent(){
+  if(eventEnded)return;
+  stopTracking();
+  eventEnded=true;
+  $('trackBtn').disabled=true;
+  $('offlineBtn').disabled=true;
+  const q=loadQueue();
+  updateStats();
+  if(!q.length){
+    status('Transfer complete','good');
+    log('EVENT END · no retained tracks');
+    return;
+  }
+  status(`Transferring ${q.length} retained track${q.length===1?'':'s'}…`,'warn');
+  log(`EVENT END · bulk transfer ${q.length} retained track${q.length===1?'':'s'}`);
+  wakeDelivery(true);
+}
+$('trackBtn').addEventListener('click',()=>running?stopTracking():startTracking());
+$('offlineBtn').addEventListener('click',()=>{simulateOffline=!simulateOffline;$('offlineBtn').textContent=simulateOffline?'Restore Google':'Simulate Offline';$('offlineBtn').className=simulateOffline?'start':'offline';updateStats();log(simulateOffline?'SIMULATED OFFLINE · GPS continues, transfer paused':'GOOGLE RESTORED · normal recovery started');if(!simulateOffline)wakeDelivery()});
+$('endBtn').addEventListener('click',endEvent);
+window.addEventListener('online',()=>{updateStats();log('DEVICE ONLINE · recovery wake');wakeDelivery()});window.addEventListener('offline',()=>{updateStats();log('DEVICE OFFLINE · tracks will remain local')});document.addEventListener('visibilitychange',()=>{if(!document.hidden)wakeDelivery()});
+try{startGps()}catch(e){log(e.message)}updateStats();if(loadQueue().length){status(`Recovered ${loadQueue().length} locally retained track(s).`,'warn');scheduleRetry()}
+if('serviceWorker'in navigator)navigator.serviceWorker.register('./service-worker.js?v=0.11').catch(()=>{});
+})();
+</script>
+</body>
+</html>
